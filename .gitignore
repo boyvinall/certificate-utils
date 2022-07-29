@@ -1,0 +1,7 @@
+*.pfx
+*.pem
+*.key
+*.crt
+*.zip
+*.csr
+*.tgz
