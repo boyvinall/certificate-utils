@@ -5,3 +5,7 @@
 *.zip
 *.csr
 *.tgz
+bin/
+dist/
+*.test
+*.out
