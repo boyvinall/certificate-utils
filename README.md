@@ -5,13 +5,13 @@ A CLI for inspecting and converting TLS certificates — no more hunting for the
 ## Installation
 
 ```sh
-go install github.com/boyvinall/certificate-utils@latest
+go install github.com/boyvinall/certificate-utils@latest  # build and install to $GOPATH/bin
 ```
 
 Or build from source:
 
 ```sh
-make build   # produces bin/certificate-utils
+make build  # produces bin/certificate-utils
 ```
 
 ## Commands
@@ -21,16 +21,20 @@ make build   # produces bin/certificate-utils
 Connect to a server and display its certificate chain, TLS session details, and verification result.
 
 ```sh
-certificate-utils connect example.com
-certificate-utils connect example.com:8443
+certificate-utils connect example.com                                           # connects to port 443
+certificate-utils connect example.com:8443                                      # specify port
+certificate-utils connect --showcerts example.com:8443                          # print PEM for all presented certs
+certificate-utils connect --showcerts=false example.com:8443                    # don't print leaf PEM
+certificate-utils connect --servername example.com someotherserver.com:8443     # override SNI
+certificate-utils connect --servername example.com --servername example2.com someotherserver.com:8443  # multiple SNI, check each
 ```
 
 **Options**
 
 | Flag | Description |
 |------|-------------|
-| `--showcerts` | Print PEM for every cert in the chain (default: leaf only) |
-| `--servername` | Override the TLS SNI name |
+| `--showcerts` | Print PEM for every cert in the chain (default: leaf only), use `--showcerts=false` to also disable printing leaf cert |
+| `--servername` | Override the TLS SNI name, can be specified multiple times |
 | `--CAfile` | PEM file of trusted CA certificates |
 | `--insecure, -k` | Skip certificate verification |
 | `--timeout` | Connection timeout (default: 10s) |
