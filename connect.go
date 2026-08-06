@@ -36,7 +36,7 @@ var connectCmd = &cli.Command{
 			Name:  "showcerts",
 			Usage: "display PEM for every certificate in the chain (default: leaf cert only)",
 		},
-		&cli.StringFlag{
+		&cli.StringSliceFlag{
 			Name:  "servername",
 			Usage: "TLS SNI server name override (default: derived from host)",
 		},
@@ -100,62 +100,70 @@ func runConnect(ctx context.Context, cmd *cli.Command) error {
 			return err
 		}
 
-		serverName := cmd.String("servername")
-		if serverName == "" {
-			serverName = host
+		serverNames := cmd.StringSlice("servername")
+		if len(serverNames) == 0 {
+			serverNames = []string{host}
 		}
-
-		// Always connect with InsecureSkipVerify so we can display cert details
-		// even when the chain is invalid. Verification is run manually below.
-		tlsCfg := &tls.Config{
-			ServerName:         serverName,
-			InsecureSkipVerify: true, //nolint:gosec
-		}
-		switch {
-		case cmd.Bool("tls1_3"):
-			tlsCfg.MinVersion = tls.VersionTLS13
-			tlsCfg.MaxVersion = tls.VersionTLS13
-		case cmd.Bool("tls1_2"):
-			tlsCfg.MinVersion = tls.VersionTLS12
-			tlsCfg.MaxVersion = tls.VersionTLS12
-		}
-
-		var customRoots *x509.CertPool
-		if caFile := cmd.String("CAfile"); caFile != "" {
-			customRoots, err = loadCertPool(caFile)
-			if err != nil {
-				return fmt.Errorf("--CAfile: %w", err)
+		for serverNameIndex, serverName := range serverNames {
+			if len(serverNames) > 1 {
+				if serverNameIndex > 0 {
+					fmt.Println()
+				}
+				colorHeader.Printf("=== SNI: %s ===\n", serverName)
 			}
-		}
 
-		if certFile := cmd.String("cert"); certFile != "" {
-			keyFile := cmd.String("key")
-			if keyFile == "" {
-				keyFile = certFile
+			// Always connect with InsecureSkipVerify so we can display cert details
+			// even when the chain is invalid. Verification is run manually below.
+			tlsCfg := &tls.Config{
+				ServerName:         serverName,
+				InsecureSkipVerify: true, //nolint:gosec
 			}
-			kp, err := tls.LoadX509KeyPair(certFile, keyFile)
-			if err != nil {
-				return fmt.Errorf("loading client certificate: %w", err)
+			switch {
+			case cmd.Bool("tls1_3"):
+				tlsCfg.MinVersion = tls.VersionTLS13
+				tlsCfg.MaxVersion = tls.VersionTLS13
+			case cmd.Bool("tls1_2"):
+				tlsCfg.MinVersion = tls.VersionTLS12
+				tlsCfg.MaxVersion = tls.VersionTLS12
 			}
-			tlsCfg.Certificates = []tls.Certificate{kp}
-		}
 
-		multi := len(ips) > 1
-		if multi {
-			fmt.Printf("%s resolves to %d address(es): %s\n\n", host, len(ips), strings.Join(ips, ", "))
-		}
+			var customRoots *x509.CertPool
+			if caFile := cmd.String("CAfile"); caFile != "" {
+				customRoots, err = loadCertPool(caFile)
+				if err != nil {
+					return fmt.Errorf("--CAfile: %w", err)
+				}
+			}
 
-		for i, ip := range ips {
-			countIP++
+			if certFile := cmd.String("cert"); certFile != "" {
+				keyFile := cmd.String("key")
+				if keyFile == "" {
+					keyFile = certFile
+				}
+				kp, err := tls.LoadX509KeyPair(certFile, keyFile)
+				if err != nil {
+					return fmt.Errorf("loading client certificate: %w", err)
+				}
+				tlsCfg.Certificates = []tls.Certificate{kp}
+			}
+
+			multi := len(ips) > 1
 			if multi {
-				colorHeader.Printf("=== [%d/%d] %s ===\n", i+1, len(ips), ip)
+				fmt.Printf("%s resolves to %d address(es): %s\n\n", host, len(ips), strings.Join(ips, ", "))
 			}
-			addr := net.JoinHostPort(ip, port)
-			if err := checkAddr(cmd, addr, serverName, tlsCfg, customRoots); err != nil {
-				failed = append(failed, fmt.Sprintf("%s: %v", ip, err))
-			}
-			if multi || multiArgs {
-				fmt.Println()
+
+			for i, ip := range ips {
+				countIP++
+				if multi {
+					colorHeader.Printf("=== [%d/%d] %s ===\n", i+1, len(ips), ip)
+				}
+				addr := net.JoinHostPort(ip, port)
+				if err := checkAddr(cmd, addr, serverName, tlsCfg, customRoots); err != nil {
+					failed = append(failed, fmt.Sprintf("%s: %v", ip, err))
+				}
+				if multi || multiArgs {
+					fmt.Println()
+				}
 			}
 		}
 	}
@@ -311,9 +319,11 @@ func printLeafDetails(cert *x509.Certificate) {
 	case remaining < 0:
 		colorFail.Printf("  Expires in: EXPIRED (%.0f days ago)\n", -remaining.Hours()/24)
 	case remaining < 30*24*time.Hour:
-		colorWarn.Printf("  Expires in: %.0f days\n", remaining.Hours()/24)
+		fmt.Printf("  Expires in: %.0f days", remaining.Hours()/24)
+		colorWarn.Printf(" (WARNING)\n")
 	default:
-		fmt.Printf("  Expires in: %.0f days\n", remaining.Hours()/24)
+		fmt.Printf("  Expires in: %.0f days", remaining.Hours()/24)
+		colorSuccess.Printf(" (OK)\n")
 	}
 }
 
