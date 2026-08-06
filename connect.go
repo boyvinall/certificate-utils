@@ -71,52 +71,111 @@ func runConnect(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("--tls1_2 and --tls1_3 are mutually exclusive")
 	}
 
-	host, port, err := parseHostPort(cmd.Args().Get(0))
+	var failed []string
+	countIP := 0
+	multiArgs := len(cmd.Args().Slice()) > 1
+	for argc, arg := range cmd.Args().Slice() {
+		if multiArgs {
+			fmt.Printf("=== [%d/%d] %s ===\n", argc+1, len(cmd.Args().Slice()), arg)
+		}
+
+		host, port, err := parseHostPort(arg)
+		if err != nil {
+			return err
+		}
+
+		ips, err := resolveIPs(ctx, host)
+		if err != nil {
+			return err
+		}
+
+		serverName := cmd.String("servername")
+		if serverName == "" {
+			serverName = host
+		}
+
+		// Always connect with InsecureSkipVerify so we can display cert details
+		// even when the chain is invalid. Verification is run manually below.
+		tlsCfg := &tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: true, //nolint:gosec
+		}
+		switch {
+		case cmd.Bool("tls1_3"):
+			tlsCfg.MinVersion = tls.VersionTLS13
+			tlsCfg.MaxVersion = tls.VersionTLS13
+		case cmd.Bool("tls1_2"):
+			tlsCfg.MinVersion = tls.VersionTLS12
+			tlsCfg.MaxVersion = tls.VersionTLS12
+		}
+
+		var customRoots *x509.CertPool
+		if caFile := cmd.String("CAfile"); caFile != "" {
+			customRoots, err = loadCertPool(caFile)
+			if err != nil {
+				return fmt.Errorf("--CAfile: %w", err)
+			}
+		}
+
+		if certFile := cmd.String("cert"); certFile != "" {
+			keyFile := cmd.String("key")
+			if keyFile == "" {
+				keyFile = certFile
+			}
+			kp, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				return fmt.Errorf("loading client certificate: %w", err)
+			}
+			tlsCfg.Certificates = []tls.Certificate{kp}
+		}
+
+		multi := len(ips) > 1
+		if multi {
+			fmt.Printf("%s resolves to %d address(es): %s\n\n", host, len(ips), strings.Join(ips, ", "))
+		}
+
+		for i, ip := range ips {
+			countIP++
+			if multi {
+				fmt.Printf("=== [%d/%d] %s ===\n", i+1, len(ips), ip)
+			}
+			addr := net.JoinHostPort(ip, port)
+			if err := checkAddr(cmd, addr, serverName, tlsCfg, customRoots); err != nil {
+				failed = append(failed, fmt.Sprintf("%s: %v", ip, err))
+			}
+			if multi || multiArgs {
+				fmt.Println()
+			}
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d address(es) failed:\n%s", len(failed), countIP, strings.Join(failed, "\n"))
+	}
+	return nil
+}
+
+// resolveIPs returns the IP address(es) to connect to for host. If host is
+// already a literal IP address it is returned as-is; otherwise it is
+// resolved via DNS and every returned address is included, so callers can
+// check the certificate on each one (e.g. behind a round-robin DNS or LB).
+func resolveIPs(ctx context.Context, host string) ([]string, error) {
+	if net.ParseIP(host) != nil {
+		return []string{host}, nil
+	}
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("resolving %s: %w", host, err)
 	}
-	addr := net.JoinHostPort(host, port)
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses found for %s", host)
+	}
+	return ips, nil
+}
 
-	serverName := cmd.String("servername")
-	if serverName == "" {
-		serverName = host
-	}
-
-	// Always connect with InsecureSkipVerify so we can display cert details
-	// even when the chain is invalid. Verification is run manually below.
-	tlsCfg := &tls.Config{
-		ServerName:         serverName,
-		InsecureSkipVerify: true, //nolint:gosec
-	}
-	switch {
-	case cmd.Bool("tls1_3"):
-		tlsCfg.MinVersion = tls.VersionTLS13
-		tlsCfg.MaxVersion = tls.VersionTLS13
-	case cmd.Bool("tls1_2"):
-		tlsCfg.MinVersion = tls.VersionTLS12
-		tlsCfg.MaxVersion = tls.VersionTLS12
-	}
-
-	var customRoots *x509.CertPool
-	if caFile := cmd.String("CAfile"); caFile != "" {
-		customRoots, err = loadCertPool(caFile)
-		if err != nil {
-			return fmt.Errorf("--CAfile: %w", err)
-		}
-	}
-
-	if certFile := cmd.String("cert"); certFile != "" {
-		keyFile := cmd.String("key")
-		if keyFile == "" {
-			keyFile = certFile
-		}
-		kp, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return fmt.Errorf("loading client certificate: %w", err)
-		}
-		tlsCfg.Certificates = []tls.Certificate{kp}
-	}
-
+// checkAddr connects to addr (a host:port with a literal IP) and prints the
+// certificate chain, leaf details, and TLS session info, then verifies the
+// chain unless --insecure was passed.
+func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, customRoots *x509.CertPool) error {
 	fmt.Printf("Connecting to %s (SNI: %s)... ", addr, serverName)
 	conn, err := tls.DialWithDialer(
 		&net.Dialer{Timeout: cmd.Duration("timeout")},
