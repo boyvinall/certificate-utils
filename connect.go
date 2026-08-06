@@ -13,7 +13,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
+)
+
+// Color output is automatically disabled by the color package when stdout
+// isn't a terminal (e.g. piped to a file) or when NO_COLOR is set.
+var (
+	colorHeader  = color.New(color.FgCyan, color.Bold)
+	colorSuccess = color.New(color.FgGreen, color.Bold)
+	colorFail    = color.New(color.FgRed, color.Bold)
+	colorWarn    = color.New(color.FgYellow, color.Bold)
+	colorBold    = color.New(color.Bold)
 )
 
 var connectCmd = &cli.Command{
@@ -76,7 +87,7 @@ func runConnect(ctx context.Context, cmd *cli.Command) error {
 	multiArgs := len(cmd.Args().Slice()) > 1
 	for argc, arg := range cmd.Args().Slice() {
 		if multiArgs {
-			fmt.Printf("=== [%d/%d] %s ===\n", argc+1, len(cmd.Args().Slice()), arg)
+			colorHeader.Printf("=== [%d/%d] %s ===\n", argc+1, len(cmd.Args().Slice()), arg)
 		}
 
 		host, port, err := parseHostPort(arg)
@@ -137,7 +148,7 @@ func runConnect(ctx context.Context, cmd *cli.Command) error {
 		for i, ip := range ips {
 			countIP++
 			if multi {
-				fmt.Printf("=== [%d/%d] %s ===\n", i+1, len(ips), ip)
+				colorHeader.Printf("=== [%d/%d] %s ===\n", i+1, len(ips), ip)
 			}
 			addr := net.JoinHostPort(ip, port)
 			if err := checkAddr(cmd, addr, serverName, tlsCfg, customRoots); err != nil {
@@ -182,11 +193,11 @@ func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, cu
 		"tcp", addr, tlsCfg,
 	)
 	if err != nil {
-		fmt.Println("FAILED")
+		colorFail.Println("FAILED")
 		return fmt.Errorf("connection failed: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	fmt.Println("connected")
+	colorSuccess.Println("connected")
 
 	state := conn.ConnectionState()
 	certs := state.PeerCertificates
@@ -197,7 +208,8 @@ func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, cu
 	}
 
 	// --- Certificate chain ---
-	fmt.Printf("\n---\nCertificate chain (%d certificate(s))\n", len(certs))
+	fmt.Println("\n---")
+	colorBold.Printf("Certificate chain (%d certificate(s))\n", len(certs))
 	for i, cert := range certs {
 		printChainEntry(i, cert)
 		if showAll || (i == 0 && showLeafCertPEM) {
@@ -213,7 +225,8 @@ func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, cu
 	}
 
 	// --- TLS session ---
-	fmt.Printf("\n---\nTLS Session\n")
+	fmt.Println("\n---")
+	colorBold.Println("TLS Session")
 	fmt.Printf("  Version: %s\n", tlsVersionName(state.Version))
 	fmt.Printf("  Cipher:  %s\n", tls.CipherSuiteName(state.CipherSuite))
 	if state.NegotiatedProtocol != "" {
@@ -224,7 +237,7 @@ func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, cu
 
 	// --- Verification ---
 	if cmd.Bool("insecure") {
-		fmt.Println("Verification: skipped (--insecure)")
+		colorWarn.Println("Verification: skipped (--insecure)")
 		return nil
 	}
 	return verifyCertChain(certs, serverName, customRoots)
@@ -261,9 +274,9 @@ func printChainEntry(idx int, cert *x509.Certificate) {
 	note := ""
 	switch {
 	case remaining < 0:
-		note = fmt.Sprintf(" (EXPIRED %.0f days ago)", -remaining.Hours()/24)
+		note = colorFail.Sprintf(" (EXPIRED %.0f days ago)", -remaining.Hours()/24)
 	case remaining < 30*24*time.Hour:
-		note = fmt.Sprintf(" (expires in %.0f days — WARNING)", remaining.Hours()/24)
+		note = colorWarn.Sprintf(" (expires in %.0f days — WARNING)", remaining.Hours()/24)
 	}
 	fmt.Printf("   v: %s → %s%s\n",
 		cert.NotBefore.UTC().Format("2006-01-02"),
@@ -294,9 +307,12 @@ func printLeafDetails(cert *x509.Certificate) {
 	}
 
 	remaining := time.Until(cert.NotAfter)
-	if remaining < 0 {
-		fmt.Printf("  Expires in: EXPIRED (%.0f days ago)\n", -remaining.Hours()/24)
-	} else {
+	switch {
+	case remaining < 0:
+		colorFail.Printf("  Expires in: EXPIRED (%.0f days ago)\n", -remaining.Hours()/24)
+	case remaining < 30*24*time.Hour:
+		colorWarn.Printf("  Expires in: %.0f days\n", remaining.Hours()/24)
+	default:
 		fmt.Printf("  Expires in: %.0f days\n", remaining.Hours()/24)
 	}
 }
@@ -307,7 +323,7 @@ func writeCertPEM(w io.Writer, cert *x509.Certificate) {
 
 func verifyCertChain(certs []*x509.Certificate, serverName string, roots *x509.CertPool) error {
 	if len(certs) == 0 {
-		fmt.Println("Verification: FAILED — no certificates received")
+		colorFail.Println("Verification: FAILED — no certificates received")
 		return fmt.Errorf("no certificates received from server")
 	}
 	intermediates := x509.NewCertPool()
@@ -320,10 +336,10 @@ func verifyCertChain(certs []*x509.Certificate, serverName string, roots *x509.C
 		Intermediates: intermediates,
 	})
 	if err != nil {
-		fmt.Printf("Verification: FAILED — %v\n", err)
+		colorFail.Printf("Verification: FAILED — %v\n", err)
 		return err
 	}
-	fmt.Println("Verification: OK")
+	colorSuccess.Println("Verification: OK")
 	return nil
 }
 
