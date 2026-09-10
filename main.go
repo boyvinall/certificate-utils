@@ -36,6 +36,7 @@ func main() {
 		Commands: []*cli.Command{
 			connectCmd,
 			convertCmd,
+			verifyCmd,
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return cli.ShowAppHelp(cmd)

@@ -75,6 +75,22 @@ openssl s_client -connect example.com:443 </dev/null 2>/dev/null | certificate-u
 | `--out, -o` | Write output to a file instead of stdout |
 | `--password, -p` | Password for PFX/PKCS12 input |
 
+### `verify` — check a certificate and key match
+
+Checks that a certificate's public key corresponds to a given private key — useful before
+loading a cert/key pair into a server.
+
+```sh
+certificate-utils verify cert.pem cert.key
+certificate-utils verify cert.pfx server.key --password secret
+```
+
+**Options**
+
+| Flag | Description |
+|------|-------------|
+| `--password, -p` | Password for PFX/PKCS12 input |
+
 **Global options**
 
 | Flag | Description |
