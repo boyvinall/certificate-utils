@@ -91,7 +91,7 @@ certificate-utils verify cert.pfx server.key --password secret
 |------|-------------|
 | `--password, -p` | Password for PFX/PKCS12 input |
 
-**Global options**
+### Global options
 
 | Flag | Description |
 |------|-------------|
