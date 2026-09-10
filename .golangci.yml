@@ -18,3 +18,9 @@ linters:
     - staticcheck
     - unused
     - ineffassign
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*github.com/fatih/color.Color).Printf
+        - (*github.com/fatih/color.Color).Println

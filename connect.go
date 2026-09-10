@@ -210,10 +210,7 @@ func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, cu
 	state := conn.ConnectionState()
 	certs := state.PeerCertificates
 	showAll := cmd.Bool("showcerts")
-	showLeafCertPEM := true
-	if cmd.IsSet("showcerts") && !cmd.Bool("showcerts") {
-		showLeafCertPEM = false
-	}
+	showLeafCertPEM := !cmd.IsSet("showcerts") || cmd.Bool("showcerts")
 
 	// --- Certificate chain ---
 	fmt.Println("\n---")
