@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,12 +11,16 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
 )
+
+// starttlsProtocols lists the plaintext protocols supported by --starttls.
+var starttlsProtocols = []string{"smtp", "imap", "pop3", "ftp"}
 
 // Color output is automatically disabled by the color package when stdout
 // isn't a terminal (e.g. piped to a file) or when NO_COLOR is set.
@@ -70,6 +75,10 @@ var connectCmd = &cli.Command{
 			Name:  "tls1_3",
 			Usage: "negotiate TLS 1.3 only",
 		},
+		&cli.StringFlag{
+			Name:  "starttls",
+			Usage: fmt.Sprintf("upgrade a plaintext connection to TLS using the given protocol (%s)", strings.Join(starttlsProtocols, ", ")),
+		},
 	},
 	Action: runConnect,
 }
@@ -81,13 +90,18 @@ func runConnect(ctx context.Context, cmd *cli.Command) error {
 	if cmd.Bool("tls1_2") && cmd.Bool("tls1_3") {
 		return fmt.Errorf("--tls1_2 and --tls1_3 are mutually exclusive")
 	}
+	starttls := cmd.String("starttls")
+	if starttls != "" && !slices.Contains(starttlsProtocols, starttls) {
+		return fmt.Errorf("--starttls: unsupported protocol %q (supported: %s)", starttls, strings.Join(starttlsProtocols, ", "))
+	}
 
 	var failed []string
 	countIP := 0
-	multiArgs := len(cmd.Args().Slice()) > 1
-	for argc, arg := range cmd.Args().Slice() {
+	args := cmd.Args().Slice()
+	multiArgs := len(args) > 1
+	for argc, arg := range args {
 		if multiArgs {
-			colorHeader.Printf("=== [%d/%d] %s ===\n", argc+1, len(cmd.Args().Slice()), arg)
+			colorHeader.Printf("=== [%d/%d] %s ===\n", argc+1, len(args), arg)
 		}
 
 		host, port, err := parseHostPort(arg)
@@ -100,77 +114,105 @@ func runConnect(ctx context.Context, cmd *cli.Command) error {
 			return err
 		}
 
-		serverNames := cmd.StringSlice("servername")
-		if len(serverNames) == 0 {
-			serverNames = []string{host}
+		argFailed, argCount, err := connectHost(cmd, host, port, ips, multiArgs)
+		if err != nil {
+			return err
 		}
-		for serverNameIndex, serverName := range serverNames {
-			if len(serverNames) > 1 {
-				if serverNameIndex > 0 {
-					fmt.Println()
-				}
-				colorHeader.Printf("=== SNI: %s ===\n", serverName)
-			}
-
-			// Always connect with InsecureSkipVerify so we can display cert details
-			// even when the chain is invalid. Verification is run manually below.
-			tlsCfg := &tls.Config{
-				ServerName:         serverName,
-				InsecureSkipVerify: true, //nolint:gosec
-			}
-			switch {
-			case cmd.Bool("tls1_3"):
-				tlsCfg.MinVersion = tls.VersionTLS13
-				tlsCfg.MaxVersion = tls.VersionTLS13
-			case cmd.Bool("tls1_2"):
-				tlsCfg.MinVersion = tls.VersionTLS12
-				tlsCfg.MaxVersion = tls.VersionTLS12
-			}
-
-			var customRoots *x509.CertPool
-			if caFile := cmd.String("CAfile"); caFile != "" {
-				customRoots, err = loadCertPool(caFile)
-				if err != nil {
-					return fmt.Errorf("--CAfile: %w", err)
-				}
-			}
-
-			if certFile := cmd.String("cert"); certFile != "" {
-				keyFile := cmd.String("key")
-				if keyFile == "" {
-					keyFile = certFile
-				}
-				kp, err := tls.LoadX509KeyPair(certFile, keyFile)
-				if err != nil {
-					return fmt.Errorf("loading client certificate: %w", err)
-				}
-				tlsCfg.Certificates = []tls.Certificate{kp}
-			}
-
-			multi := len(ips) > 1
-			if multi {
-				fmt.Printf("%s resolves to %d address(es): %s\n\n", host, len(ips), strings.Join(ips, ", "))
-			}
-
-			for i, ip := range ips {
-				countIP++
-				if multi {
-					colorHeader.Printf("=== [%d/%d] %s ===\n", i+1, len(ips), ip)
-				}
-				addr := net.JoinHostPort(ip, port)
-				if err := checkAddr(cmd, addr, serverName, tlsCfg, customRoots); err != nil {
-					failed = append(failed, fmt.Sprintf("%s: %v", ip, err))
-				}
-				if multi || multiArgs {
-					fmt.Println()
-				}
-			}
-		}
+		failed = append(failed, argFailed...)
+		countIP += argCount
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("%d of %d address(es) failed:\n%s", len(failed), countIP, strings.Join(failed, "\n"))
 	}
 	return nil
+}
+
+// connectHost checks host on every servername × ip combination, printing
+// results as it goes, and returns the per-address failures and the number of
+// addresses checked.
+func connectHost(cmd *cli.Command, host, port string, ips []string, multiArgs bool) ([]string, int, error) {
+	var failed []string
+	countIP := 0
+
+	serverNames := cmd.StringSlice("servername")
+	if len(serverNames) == 0 {
+		serverNames = []string{host}
+	}
+	for serverNameIndex, serverName := range serverNames {
+		if len(serverNames) > 1 {
+			if serverNameIndex > 0 {
+				fmt.Println()
+			}
+			colorHeader.Printf("=== SNI: %s ===\n", serverName)
+		}
+
+		tlsCfg, customRoots, err := buildTLSConfig(cmd, serverName)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		multi := len(ips) > 1
+		if multi {
+			fmt.Printf("%s resolves to %d address(es): %s\n\n", host, len(ips), strings.Join(ips, ", "))
+		}
+
+		for i, ip := range ips {
+			countIP++
+			if multi {
+				colorHeader.Printf("=== [%d/%d] %s ===\n", i+1, len(ips), ip)
+			}
+			addr := net.JoinHostPort(ip, port)
+			if err := checkAddr(cmd, addr, serverName, tlsCfg, customRoots); err != nil {
+				failed = append(failed, fmt.Sprintf("%s: %v", ip, err))
+			}
+			if multi || multiArgs {
+				fmt.Println()
+			}
+		}
+	}
+	return failed, countIP, nil
+}
+
+// buildTLSConfig assembles the tls.Config and custom root pool for
+// serverName from the command's TLS-related flags.
+func buildTLSConfig(cmd *cli.Command, serverName string) (*tls.Config, *x509.CertPool, error) {
+	// Always connect with InsecureSkipVerify so we can display cert details
+	// even when the chain is invalid. Verification is run manually below.
+	tlsCfg := &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: true, //nolint:gosec
+	}
+	switch {
+	case cmd.Bool("tls1_3"):
+		tlsCfg.MinVersion = tls.VersionTLS13
+		tlsCfg.MaxVersion = tls.VersionTLS13
+	case cmd.Bool("tls1_2"):
+		tlsCfg.MinVersion = tls.VersionTLS12
+		tlsCfg.MaxVersion = tls.VersionTLS12
+	}
+
+	var customRoots *x509.CertPool
+	if caFile := cmd.String("CAfile"); caFile != "" {
+		var err error
+		customRoots, err = loadCertPool(caFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--CAfile: %w", err)
+		}
+	}
+
+	if certFile := cmd.String("cert"); certFile != "" {
+		keyFile := cmd.String("key")
+		if keyFile == "" {
+			keyFile = certFile
+		}
+		kp, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{kp}
+	}
+
+	return tlsCfg, customRoots, nil
 }
 
 // resolveIPs returns the IP address(es) to connect to for host. If host is
@@ -195,16 +237,48 @@ func resolveIPs(ctx context.Context, host string) ([]string, error) {
 // certificate chain, leaf details, and TLS session info, then verifies the
 // chain unless --insecure was passed.
 func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, customRoots *x509.CertPool) error {
+	timeout := cmd.Duration("timeout")
 	fmt.Printf("Connecting to %s (SNI: %s)... ", addr, serverName)
-	conn, err := tls.DialWithDialer(
-		&net.Dialer{Timeout: cmd.Duration("timeout")},
-		"tcp", addr, tlsCfg,
-	)
-	if err != nil {
-		colorFail.Println("FAILED")
-		return fmt.Errorf("connection failed: %w", err)
+
+	var conn *tls.Conn
+	if protocol := cmd.String("starttls"); protocol != "" {
+		raw, err := net.DialTimeout("tcp", addr, timeout)
+		if err != nil {
+			colorFail.Println("FAILED")
+			return fmt.Errorf("connection failed: %w", err)
+		}
+		deadline := time.Now().Add(timeout)
+		if err := raw.SetDeadline(deadline); err != nil {
+			_ = raw.Close()
+			return fmt.Errorf("setting deadline: %w", err)
+		}
+		if err := starttlsHandshake(protocol, raw); err != nil {
+			colorFail.Println("FAILED")
+			_ = raw.Close()
+			return fmt.Errorf("starttls (%s): %w", protocol, err)
+		}
+
+		hsCtx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+		conn = tls.Client(raw, tlsCfg)
+		if err := conn.HandshakeContext(hsCtx); err != nil {
+			colorFail.Println("FAILED")
+			_ = conn.Close()
+			return fmt.Errorf("TLS handshake failed: %w", err)
+		}
+		if err := raw.SetDeadline(time.Time{}); err != nil {
+			return fmt.Errorf("clearing deadline: %w", err)
+		}
+		defer func() { _ = conn.Close() }()
+	} else {
+		var err error
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", addr, tlsCfg)
+		if err != nil {
+			colorFail.Println("FAILED")
+			return fmt.Errorf("connection failed: %w", err)
+		}
+		defer func() { _ = conn.Close() }()
 	}
-	defer func() { _ = conn.Close() }()
 	colorSuccess.Println("connected")
 
 	state := conn.ConnectionState()
@@ -246,6 +320,118 @@ func checkAddr(cmd *cli.Command, addr, serverName string, tlsCfg *tls.Config, cu
 		return nil
 	}
 	return verifyCertChain(certs, serverName, customRoots)
+}
+
+// starttlsHandshake performs the plaintext protocol exchange that requests a
+// TLS upgrade on conn, leaving conn ready for the TLS ClientHello.
+func starttlsHandshake(protocol string, conn net.Conn) error {
+	r := bufio.NewReader(conn)
+	switch protocol {
+	case "smtp":
+		if _, err := readSMTPReply(r); err != nil { // greeting
+			return err
+		}
+		if err := writeLine(conn, "EHLO certificate-utils"); err != nil {
+			return err
+		}
+		if _, err := readSMTPReply(r); err != nil { // EHLO response
+			return err
+		}
+		if err := writeLine(conn, "STARTTLS"); err != nil {
+			return err
+		}
+		code, err := readSMTPReply(r)
+		if err != nil {
+			return err
+		}
+		if code != "220" {
+			return fmt.Errorf("server rejected STARTTLS: %s", code)
+		}
+		return nil
+
+	case "imap":
+		if _, err := r.ReadString('\n'); err != nil { // greeting
+			return err
+		}
+		if err := writeLine(conn, "a1 STARTTLS"); err != nil {
+			return err
+		}
+		line, err := readIMAPUntilTagged(r, "a1")
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(line, "OK") {
+			return fmt.Errorf("server rejected STARTTLS: %s", strings.TrimSpace(line))
+		}
+		return nil
+
+	case "pop3":
+		return plaintextUpgrade(r, conn, "STLS", "+OK")
+
+	case "ftp":
+		return plaintextUpgrade(r, conn, "AUTH TLS", "234")
+
+	default:
+		return fmt.Errorf("unsupported protocol %q", protocol)
+	}
+}
+
+// plaintextUpgrade reads a single-line greeting, sends cmd, and checks that
+// the reply starts with okPrefix, as used by the pop3 (STLS) and ftp (AUTH
+// TLS) STARTTLS variants.
+func plaintextUpgrade(r *bufio.Reader, conn net.Conn, cmd, okPrefix string) error {
+	if _, err := r.ReadString('\n'); err != nil { // greeting
+		return err
+	}
+	if err := writeLine(conn, cmd); err != nil {
+		return err
+	}
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(line, okPrefix) {
+		return fmt.Errorf("server rejected %s: %s", cmd, strings.TrimSpace(line))
+	}
+	return nil
+}
+
+func writeLine(w io.Writer, line string) error {
+	_, err := fmt.Fprintf(w, "%s\r\n", line)
+	return err
+}
+
+// readSMTPReply reads a (possibly multi-line) SMTP reply and returns its
+// 3-digit status code.
+func readSMTPReply(r *bufio.Reader) (code string, err error) {
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+		if len(line) < 4 {
+			return "", fmt.Errorf("malformed SMTP reply: %q", line)
+		}
+		code = line[:3]
+		if line[3] == ' ' {
+			return code, nil
+		}
+		// line[3] == '-' means more lines follow.
+	}
+}
+
+// readIMAPUntilTagged reads lines until one begins with the given command
+// tag, returning that line.
+func readIMAPUntilTagged(r *bufio.Reader, tag string) (string, error) {
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			return line, nil
+		}
+	}
 }
 
 // parseHostPort splits target into host and port, defaulting to port 443.
