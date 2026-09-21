@@ -496,6 +496,9 @@ func printLeafDetails(cert *x509.Certificate) {
 	if len(cert.EmailAddresses) > 0 {
 		fmt.Printf("  Email SANs: %s\n", strings.Join(cert.EmailAddresses, ", "))
 	}
+	if len(cert.CRLDistributionPoints) > 0 {
+		fmt.Printf("  CRL:        %s\n", strings.Join(cert.CRLDistributionPoints, ", "))
+	}
 
 	remaining := time.Until(cert.NotAfter)
 	switch {
